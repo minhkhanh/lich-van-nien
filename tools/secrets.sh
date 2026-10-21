@@ -4,6 +4,7 @@
 #
 #   tools/secrets.sh pull     # Bitwarden -> secrets.yaml (mode 600)
 #   tools/secrets.sh push     # secrets.yaml -> Bitwarden (creates the note or replaces its fields)
+#   tools/secrets.sh check    # compare Bitwarden with secrets.yaml, key names only
 #   tools/secrets.sh deploy   # secrets.yaml -> HA /config/esphome/secrets.yaml (old file backed up)
 #
 # Needs the Bitwarden CLI (brew install bitwarden-cli), `bw login` once, and asks for the master password
@@ -79,6 +80,20 @@ case "${1:-}" in
       echo "Created '$ITEM' ($(jq length <<<"$fields") fields)"
     fi
     ;;
+  check)
+    [ -f "$FILE" ] || { echo "No $FILE" >&2; exit 1; }
+    session
+    id=$(item_id)
+    [ -n "$id" ] || { echo "No Bitwarden item named '$ITEM'" >&2; exit 1; }
+    # Per key: OK, DIFFERENT, or only on one side. Values are never printed.
+    jq -rn --argjson bw "$(bw get item "$id" | jq '.fields // []')" --argjson loc "$(yaml_to_fields)" '
+      ($bw | map({(.name): .value}) | add // {}) as $b | ($loc | map({(.name): .value}) | add // {}) as $l |
+      (($b | keys) + ($l | keys) | unique)[] as $k |
+      if ($b | has($k)) and ($l | has($k)) then
+        (if $b[$k] == $l[$k] then "OK         " else "DIFFERENT  " end) + $k
+      elif ($b | has($k)) then "only in Bitwarden  " + $k
+      else "only in secrets.yaml  " + $k end'
+    ;;
   deploy)
     [ -f "$FILE" ] || { echo "No $FILE" >&2; exit 1; }
     ssh hass 'cp /config/esphome/secrets.yaml /config/esphome/secrets.yaml.bak.$(date +%s)'
@@ -86,7 +101,7 @@ case "${1:-}" in
     echo "Copied $FILE to HA (previous file backed up)"
     ;;
   *)
-    sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
     ;;
 esac

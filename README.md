@@ -31,6 +31,7 @@ on HA, shared by the other ESPHome devices. `tools/secrets.sh` (Bitwarden CLI, `
 ```sh
 tools/secrets.sh pull     # Bitwarden -> secrets.yaml
 tools/secrets.sh push     # secrets.yaml -> Bitwarden, after editing it
+tools/secrets.sh check    # Bitwarden vs secrets.yaml, key names only
 tools/secrets.sh deploy   # secrets.yaml -> HA (backs up the old file)
 ``` `.gitignore` keeps it, `firmware/`, `clock-backup/`, the
 saved stock web page and `.esphome/` out of git, since all of them contain credentials.
