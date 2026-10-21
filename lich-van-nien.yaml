@@ -1,0 +1,1112 @@
+substitutions:
+  name: "lich-van-nien"
+  friendly_name: "Lunar Calendar Clock"
+  device_description: "LongSmart LICH VAN NIEN V2.0 (LS-LVN-P510), ESP32 + P5 HUB75 64x32"
+  # HA entities shown on the data pages
+  pm_in_entity: sensor.pth9bw_pm2_5                     # indoor PM2.5 (PTH9BW, portable)
+  co2_entity: sensor.pth9bw_carbon_dioxide
+  temp_entity: sensor.pth9bw_temperature               # falls back to the clock's own sensor
+  hum_entity: sensor.pth9bw_humidity
+
+# Pinout recovered from the stock firmware v2.18, see clock-backup/PINOUT.md.
+# Stock firmware backup: clock-backup/lichvannien_v2.18_full.bin (esptool write_flash 0 <file>).
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  comment: ${device_description}
+  min_version: 2026.9.0
+  includes:
+    - includes/amlich.h
+    - includes/clock_util.h
+    - includes/events.h
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+# Alarms (packages/alarm.yaml): on/off, time, days, tone each
+packages:
+  alarm1: !include {file: packages/alarm.yaml, vars: {n: "1", time: "06:30:00"}}
+  alarm2: !include {file: packages/alarm.yaml, vars: {n: "2", time: "07:00:00"}}
+  alarm3: !include {file: packages/alarm.yaml, vars: {n: "3", time: "13:30:00"}}
+
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [rx8025]
+
+logger:
+  level: INFO
+
+api:
+  encryption:
+    key: !secret clock_api_key
+  actions:
+    - action: play_rtttl
+      variables:
+        song: string
+      then:
+        - rtttl.play: !lambda "return song;"
+    # Scroll a message (Vietnamese diacritics OK) three times with a beep
+    - action: show_message
+      variables:
+        message: string
+      then:
+        - text.set:
+            id: message_text
+            value: !lambda "return message;"
+
+ota:
+  # Uploads are authenticated and encrypted with the api encryption key
+  - platform: esphome
+    encryption:
+  # Upload from the web UI (login required) or
+  # `curl --digest -u admin:<clock_web_password> -F file=@firmware.ota.bin http://<ip>/update`
+  - platform: web_server
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Lich Van Nien Fallback"
+    password: "lichvannien"
+
+captive_portal:
+
+web_server:
+  port: 80
+  auth:
+    type: digest
+    username: admin
+    password: !secret clock_web_password
+
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+
+time:
+  - platform: homeassistant
+    id: ha_time
+    timezone: Asia/Ho_Chi_Minh
+    on_time_sync:
+      - lambda: id(rtc).write_time();
+      - component.update: rtc_time
+    # Hourly chime (stock: off / tone 1-3), quiet in the night mode window and while an alarm rings
+    on_time:
+      - seconds: 0
+        minutes: 0
+        then:
+          - if:
+              condition:
+                lambda: |-
+                  auto now = id(ha_time).now();
+                  bool night = id(night_mode).state &&
+                               clock_util::in_hours(now.hour, (int) id(night_start).state, (int) id(night_end).state);
+                  return id(hourly_chime).active_index().value_or(0) > 0 && !id(alarm_ringing) && !night;
+              then:
+                - rtttl.play: !lambda "return clock_util::stock_tone(id(hourly_chime).active_index().value_or(1) - 1);"
+  - platform: rx8025
+    id: rtc
+    timezone: Asia/Ho_Chi_Minh
+    update_interval: never
+
+globals:
+  # Bottom line page: 0 date, 1 lunar date, 2 indoor air, 3 temperature + humidity, 4 today's events
+  - id: page
+    type: int
+    initial_value: "0"
+  - id: page_tick
+    type: int
+    initial_value: "0"
+  # Brightness actually on the panel, and where the fade is heading
+  - id: applied_brightness
+    type: int
+    initial_value: "128"
+  - id: target_brightness
+    type: int
+    initial_value: "128"
+  # Message marquee state
+  - id: msg_x
+    type: int
+    initial_value: "64"
+  - id: msg_passes
+    type: int
+    initial_value: "0"
+  - id: msg_done
+    type: bool
+    initial_value: "false"
+  # Today's events (refreshed when the date changes) and their marquee page
+  - id: today_event
+    type: std::string
+  - id: ev_x
+    type: int
+    initial_value: "64"
+  - id: ev_done
+    type: bool
+    initial_value: "false"
+  # Alarm ringing: tone index and when it started (millis)
+  - id: alarm_ringing
+    type: bool
+    initial_value: "false"
+  - id: alarm_tone
+    type: int
+    initial_value: "0"
+  - id: alarm_start
+    type: uint32_t
+    initial_value: "0"
+
+interval:
+  # 20 fps so the message marquee scrolls smoothly
+  - interval: 50ms
+    then:
+      - component.update: matrix
+  # Night mode window and auto brightness are re-applied every minute
+  - interval: 60s
+    then:
+      - script.execute:
+          id: apply_brightness
+          force: false
+  # Fade towards the target instead of jumping (about half a second for a large change)
+  - interval: 40ms
+    then:
+      - lambda: |-
+          int cur = id(applied_brightness), tgt = id(target_brightness);
+          if (cur == tgt) return;
+          int step = std::max(1, std::abs(tgt - cur) / 8);
+          cur += tgt > cur ? std::min(step, tgt - cur) : -std::min(step, cur - tgt);
+          id(applied_brightness) = cur;
+          id(matrix).set_brightness(cur);
+          if (cur == tgt) id(display_brightness).update();
+  - interval: 1s
+    then:
+      - lambda: |-
+          // The event page stays until its text has scrolled past once
+          if (id(page) == 4) {
+            if (!id(ev_done)) return;
+          } else if (++id(page_tick) < (int) id(page_duration).state) {
+            return;
+          }
+          id(page_tick) = 0;
+          bool enabled[5] = {true, id(show_lunar).state, id(show_air).state, id(show_climate).state,
+                             id(show_events).state && !id(today_event).empty()};
+          for (int i = 0; i < 5; i++) {
+            id(page) = (id(page) + 1) % 5;
+            if (enabled[id(page)]) break;
+          }
+          if (id(page) == 4) {
+            id(ev_x) = 64;
+            id(ev_done) = false;
+          }
+      - if:
+          condition:
+            lambda: return id(msg_done);
+          then:
+            - lambda: id(msg_done) = false;
+            - text.set:
+                id: message_text
+                value: ""
+
+# ---- Display -------------------------------------------------------------
+
+font:
+  # Stock firmware clock digits (tools/extract_hourfonts.py), chosen with "Time font": 16-row digits with
+  # matching small seconds, and 22-row digits that fill the width
+  - file: fonts/lvn-hour16-1.bdf
+    id: font_h16_1
+    glyphs: "0123456789:"
+  - file: fonts/lvn-hour16-1-small.bdf
+    id: font_s16_1
+    glyphs: "0123456789"
+  - file: fonts/lvn-hour16-2.bdf
+    id: font_h16_2
+    glyphs: "0123456789:"
+  - file: fonts/lvn-hour16-2-small.bdf
+    id: font_s16_2
+    glyphs: "0123456789"
+  - file: fonts/lvn-hour16-3.bdf
+    id: font_h16_3
+    glyphs: "0123456789:"
+  - file: fonts/lvn-hour16-3-small.bdf
+    id: font_s16_3
+    glyphs: "0123456789"
+  - file: fonts/lvn-hour16-4.bdf
+    id: font_h16_4
+    glyphs: "0123456789:"
+  - file: fonts/lvn-hour16-4-small.bdf
+    id: font_s16_4
+    glyphs: "0123456789"
+  - file: fonts/lvn-hour22-1.bdf
+    id: font_h22_1
+    glyphs: "0123456789:"
+  - file: fonts/lvn-hour22-2.bdf
+    id: font_h22_2
+    glyphs: "0123456789:"
+  - file: fonts/lvn-hour22-3.bdf
+    id: font_h22_3
+    glyphs: "0123456789:"
+  - file: fonts/lvn-hour22-4.bdf
+    id: font_h22_4
+    glyphs: "0123456789:"
+  # Seconds and labels: X11 misc-fixed 5x8 made proportional by tools/propbdf.py (6-row caps, ASCII and °).
+  # Bitmap fonts stay sharp; TrueType pixel fonts smear at any size but their native one.
+  - file: fonts/5x8-prop.bdf
+    id: font_tiny
+    glyphs: " 0123456789/:.,-+%°ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+  # Digits on the bottom line: square seven-segment style, 8 rows like the text font's capitals
+  # (tools/seg7bdf.py --height=8)
+  - file: fonts/seg7-5x8.bdf
+    id: font_seg
+    glyphs: "0123456789-"
+  # Bold digits for the bottom line: 2 px vertical segments (tools/seg7bdf.py --bold --height=8)
+  - file: fonts/seg7-6x8-bold.bdf
+    id: font_seg_bold
+    glyphs: "0123456789-"
+  # All other text (bottom line, messages, events), chosen with "Font": the stock firmware's own font
+  # (tools/extract_stockfont.py), made bold or as is. 13-row bitmap fonts (ascent 11, descent 2) with
+  # precomposed Vietnamese letters, so the strokes stay even. No "'": it is skipped like the stock firmware does.
+  - file: fonts/lvn-stock-bold.bdf
+    id: font_text_bold
+    glyphs: &text_glyphs
+      - " !\"#%&()*+,-./0123456789:;<=>?@[]_°"
+      - "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+      - "àáảãạăằắẳẵặâầấẩẫậđèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵ"
+      - "ÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬĐÈÉẺẼẸÊỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢÙÚỦŨỤƯỪỨỬỮỰỲÝỶỸỴ"
+  - file: fonts/lvn-stock.bdf
+    id: font_text_thin
+    glyphs: *text_glyphs
+
+color:
+  - id: c_time
+    red: 100%
+    green: 35%
+    blue: 0%
+  - id: c_sec
+    red: 100%
+    green: 100%
+    blue: 100%
+  - id: c_solar
+    red: 0%
+    green: 80%
+    blue: 100%
+  - id: c_lunar
+    red: 100%
+    green: 85%
+    blue: 0%
+  - id: c_temp
+    red: 20%
+    green: 100%
+    blue: 20%
+  - id: c_label
+    red: 75%
+    green: 75%
+    blue: 75%
+  - id: c_msg
+    red: 100%
+    green: 100%
+    blue: 100%
+
+display:
+  - platform: hub75
+    id: matrix
+    panel_width: 64
+    panel_height: 32
+    r1_pin: GPIO2
+    g1_pin: GPIO26
+    b1_pin: GPIO27
+    r2_pin: GPIO14
+    g2_pin: GPIO12
+    b2_pin: GPIO13
+    a_pin: GPIO23
+    b_pin: GPIO19
+    c_pin: GPIO5
+    d_pin: GPIO17
+    lat_pin: GPIO4
+    oe_pin: GPIO15
+    clk_pin: GPIO16
+    brightness: 128
+    # The lambda redraws from scratch every frame; without a second buffer the DMA scans the
+    # half-cleared frame and the text flickers
+    double_buffer: true
+    # The refresh rate otherwise follows update_interval (clamped to 40 Hz), which shows as shimmer.
+    # ESP32 I2S tops out at 10 MHz, so 120 Hz shows the lowest colour bit once. Stock firmware:
+    # 20 MHz, 60 Hz min, latch_blanking 2.
+    min_refresh_rate: 120
+    # 6 bits instead of 8 shrinks the DMA buffers and descriptor chains (allocated twice with double_buffer).
+    # esp-hub75 0.3.5 crashes at boot when the second buffer can't be allocated: it logs "continuing in
+    # single-buffer mode" and then builds descriptor chain [1] from a null row buffer.
+    bit_depth: 6
+    latch_blanking: 2
+    # Redrawn by the 50 ms interval instead, since update_interval would override min_refresh_rate
+    update_interval: never
+    lambda: |-
+      using namespace clock_util;
+      auto now = id(ha_time).now();
+      if (!now.is_valid()) {
+        it.print(32, 16, id(font_tiny), id(c_solar), TextAlign::CENTER, "NO TIME");
+        return;
+      }
+      // All text is placed by baseline. Time rows 0-21 (22-row digits) or 1-16; the bottom line sits below.
+      // Time and seconds are centred together; the seconds width is fixed so the time does not shift.
+      bool show_sec = id(show_seconds).state;
+      // "Time font": the stock digits, 0-3 at 22 rows, 4-7 the same styles at 16 rows
+      static const char *const TIME_FONTS[] = {"Round 22", "Segment 22", "Outline 22", "Italic 22",
+                                               "Round 16", "Segment 16", "Square 16",  "Bold round 16"};
+      const std::string &tsel = id(time_font).current_option();
+      int ts = 0;
+      for (int i = 0; i < 8; i++)
+        if (tsel == TIME_FONTS[i]) ts = i;
+      // The 22-row digits leave no room for seconds or the 13-row marquee; the same style's 16-row digits stand in
+      bool marquee = !id(message_text).state.empty() || id(page) == 4;
+      if (ts < 4 && (show_sec || marquee)) ts += 4;
+      bool big = ts < 4;
+      font::Font *const H16[] = {id(font_h16_1), id(font_h16_2), id(font_h16_3), id(font_h16_4)};
+      font::Font *const S16[] = {id(font_s16_1), id(font_s16_2), id(font_s16_3), id(font_s16_4)};
+      font::Font *const H22[] = {id(font_h22_1), id(font_h22_2), id(font_h22_3), id(font_h22_4)};
+      // Time and seconds fonts, and the time baseline
+      font::Font *tf = big ? H22[ts] : H16[ts - 4], *sf = S16[ts % 4];
+      const int TB = big ? 22 : 17;
+      char hm[6], sec[3];
+      snprintf(hm, sizeof(hm), "%02d:%02d", now.hour, now.minute);
+      snprintf(sec, sizeof(sec), "%02d", now.second);
+      int bx, by, sw = 0, h;
+      if (show_sec) it.get_text_bounds(0, 0, "00", sf, TextAlign::BASELINE_LEFT, &bx, &by, &sw, &h);
+      // Centre the lit pixels rather than the advances: "1" carries a wide left side bearing
+      int ink_l = 0, ink_r = 0, adv = 0;
+      for (int i = 0; i < 5; i++) {
+        auto *g = tf->find_glyph(hm[i]);
+        if (i == 0) ink_l = g->offset_x;
+        ink_r = adv + g->offset_x + g->width;
+        adv += g->advance;
+      }
+      int x0 = (it.get_width() - (ink_r - ink_l + (show_sec ? sw : 0))) / 2 - ink_l;
+      // The colon is lit for the first half of each second
+      static int last_sec = -1;
+      static uint32_t sec_start = 0;
+      if (now.second != last_sec) {
+        last_sec = now.second;
+        sec_start = millis();
+      }
+      bool colon = millis() - sec_start < 500;
+      // Time colour: Orange, Per digit (fixed palette) or Rainbow (hue drifts across the digits and over time)
+      const std::string &mode = id(time_color).current_option();
+      static const Color DIGIT[] = {Color(0, 200, 255), Color(0, 230, 80), Color(255, 255, 255),
+                                    Color(255, 200, 0), Color(255, 60, 60)};
+      int x = x0;
+      for (int i = 0; i < 5; i++) {
+        Color c = mode == "Orange"      ? id(c_time)
+                  : mode == "Per digit" ? DIGIT[i]
+                                        : ESPHSVColor((uint8_t) (millis() / 40 + i * 40), 255, 255).to_rgb();
+        if (i != 2 || colon) {
+          char ch[2] = {hm[i], 0};
+          it.print(x, TB, tf, c, TextAlign::BASELINE_LEFT, ch);
+        }
+        x += tf->find_glyph(hm[i])->advance;
+      }
+      if (show_sec) it.print(x0 + ink_r + 1, TB, sf, id(c_sec), TextAlign::BASELINE_LEFT, sec);
+
+      // Refresh the lunar date and today's events when the date changes
+      static int cached_day = -1;
+      static amlich::Lunar l;
+      if (now.day_of_month != cached_day) {
+        l = amlich::solar_to_lunar(now.day_of_month, now.month, now.year);
+        id(today_event) = events::today(now.day_of_month, now.month, l);
+        id(event_text).publish_state(id(today_event));
+        cached_day = now.day_of_month;
+      }
+
+      // Baseline 30 puts the text fonts' 13 rows on 19-31, under the 16-row time the marquee switches to
+      // "Font" picks bold or thin for all text below the time; digits follow in the matching seven-segment font
+      bool thin = id(text_font).current_option() == "Thin";
+      font::Font *mf = thin ? id(font_text_thin) : id(font_text_bold);
+      font::Font *df = thin ? id(font_seg) : id(font_seg_bold);
+      const int MB = 30;
+      // Message marquee replaces the bottom line until it has scrolled past three times
+      const std::string &msg = id(message_text).state;
+      if (!msg.empty()) {
+        int mw;
+        it.get_text_bounds(0, 0, msg.c_str(), mf, TextAlign::BASELINE_LEFT, &bx, &by, &mw, &h);
+        it.print(id(msg_x), MB, mf, id(c_msg), TextAlign::BASELINE_LEFT, msg.c_str());
+        if (--id(msg_x) < -mw) {
+          id(msg_x) = it.get_width();
+          if (++id(msg_passes) >= 3) id(msg_done) = true;
+        }
+        return;
+      }
+
+      // Bottom line baseline: one row lower under the 22-row digits
+      const int LB = big ? 31 : 30;
+      // Advance width (right alignment at x=0 puts the start at -advance)
+      auto width = [&](const char *s, display::BaseFont *font) {
+        int w;
+        it.get_text_bounds(0, 0, s, font, TextAlign::BASELINE_RIGHT, &bx, &by, &w, &h);
+        return -bx;
+      };
+      // Digits and "-" in the seven-segment font, everything else in the text font; align 0 left, 1 right,
+      // 2 centre. Returns the width; draw=false only measures.
+      auto mixed = [&](int x, int y, int align, Color c, const char *s, bool draw = true) {
+        std::vector<std::pair<std::string, font::Font *>> runs;
+        for (const char *p = s; *p; p++) {
+          font::Font *fnt = (isdigit((unsigned char) *p) || *p == '-') ? df : mf;
+          if (runs.empty() || runs.back().second != fnt) runs.emplace_back("", fnt);
+          runs.back().first += *p;
+        }
+        int total = 0;
+        for (auto &r : runs) total += width(r.first.c_str(), r.second);
+        if (!draw) return total;
+        x -= align == 1 ? total : align == 2 ? total / 2 : 0;
+        for (auto &r : runs) {
+          it.print(x, y, r.second, c, TextAlign::BASELINE_LEFT, r.first.c_str());
+          x += width(r.first.c_str(), r.second);
+        }
+        return total;
+      };
+      // Icons, one char per pixel, bottom row on the digits' bottom row (most are 9 rows, as tall as the digits):
+      // O grey outline, R red, B blue, W glint, U sun disc, y sun ray, P pale moon, S star,
+      // T level colour (passed in)
+      static const char *const SUN[9] = {"....y....", "y...y...y", ".y.UUU.y.", "..UUUUU..", "yyUUUUUyy",
+                                         "..UUUUU..", ".y.UUU.y.", "y...y...y", "....y...."};
+      static const char *const MOON[9] = {"..PPPP...", ".PPP.....", "PPP....S.", "PPP...SSS", "PPP....S.",
+                                          "PPP......", "PPP......", ".PPP.....", "..PPPP..."};
+      static const char *const THERMO[9] = {".OOO.", ".ORO.", ".ORO.", ".ORO.", ".ORO.",
+                                            "ORRRO", "ORRRO", "ORRRO", ".OOO."};
+      static const char *const DROP[9] = {"..B..", "..B..", ".BBB.", ".BBB.", "BBBBB",
+                                          "BWBBB", "BWBBB", "BBBBB", ".BBB."};
+      // The dust icon is 11 rows, reaching two rows above the digits
+      static const char *const DUST[11] = {"T....T...T", "..TT......", ".TTT...T..", "..T..TT...",
+                                           "T....TT..T", "...T.....T", "TT.....TT.", "TT..T..TT.",
+                                           "...TTT....", ".T..T...T.", "T.....T..T"};
+      // Draws an n-row icon with its left edge at x0 and returns its width
+      auto icon = [&](int x0, const char *const *rows, int n = 9, Color tint = Color()) {
+        int w = strlen(rows[0]);
+        for (int r = 0; r < n; r++)
+          for (int c = 0; c < w; c++) {
+            Color col;
+            switch (rows[r][c]) {
+              case 'O': col = Color(170, 170, 170); break;
+              case 'R': col = Color(255, 40, 40); break;
+              case 'B': col = Color(0, 120, 255); break;
+              case 'W': col = Color(200, 230, 255); break;
+              case 'U': col = Color(255, 170, 0); break;
+              case 'y': col = Color(255, 225, 60); break;
+              case 'P': col = Color(255, 235, 150); break;
+              case 'S': col = Color(255, 255, 255); break;
+              case 'T': col = tint; break;
+              default: continue;
+            }
+            it.draw_pixel_at(x0 + c, LB - n + r, col);
+          }
+        return w;
+      };
+      // Icon, 2 px gap, then text; the group is centred
+      auto icon_text = [&](const char *const *rows, Color c, const char *s) {
+        int w = strlen(rows[0]) + 2 + mixed(0, 0, 0, c, s, false);
+        int x = 32 - w / 2;
+        x += icon(x, rows) + 2;
+        mixed(x, LB, 0, c, s);
+      };
+      char buf[24], buf2[24];
+      switch (id(page)) {
+        case 1: {  // lunar date, without the year
+          // The moon icon says "lunar", so the text is just day/month (N: leap month)
+          snprintf(buf, sizeof(buf), l.leap ? "%d/%dN" : "%d/%d", l.day, l.month);
+          icon_text(MOON, id(c_lunar), buf);
+          break;
+        }
+        case 2: {  // indoor air (PTH9BW): dust icon + PM2.5 left, "CO2" label + ppm right, coloured by level
+          float pm = id(ha_pm_in).state, co2 = id(ha_co2).state;
+          snprintf(buf, sizeof(buf), std::isnan(pm) ? "--" : "%.0f", pm);
+          snprintf(buf2, sizeof(buf2), std::isnan(co2) ? "--" : "%.0f", co2);
+          Color cpm = pm25_color(pm), cco = co2_color(co2);
+          int wpm = mixed(0, 0, 0, cpm, buf, false), wco = mixed(0, 0, 0, cco, buf2, false);
+          int wlabel = width("CO2", id(font_tiny)) + 1;
+          // The dust icon goes when it would leave less than 1 px before the label (long values)
+          int xpm = 0;
+          if (10 + 2 + wpm + 1 + wlabel + wco <= it.get_width()) xpm = icon(0, DUST, 11, cpm) + 2;
+          mixed(xpm, LB, 0, cpm, buf);
+          it.print(64 - wco - wlabel, LB, id(font_tiny), id(c_label), TextAlign::BASELINE_LEFT, "CO2");
+          mixed(64, LB, 1, cco, buf2);
+          break;
+        }
+        case 3: {  // temperature and humidity (PTH9BW), each behind its icon
+          float t = id(ha_temp).state, hum = id(ha_hum).state;
+          if (std::isnan(t) && id(temperature).has_state()) t = id(temperature).state;
+          snprintf(buf2, sizeof(buf2), std::isnan(hum) ? "--%%" : "%.0f%%", hum);
+          int hw = mixed(0, 0, 0, Color(), buf2, false);
+          snprintf(buf, sizeof(buf), std::isnan(t) ? "--°" : "%.1f°", t);
+          // Whole degrees when the decimal would run into the humidity icon (100%)
+          if (!std::isnan(t) && 7 + mixed(0, 0, 0, Color(), buf, false) + 2 > 64 - hw - 7)
+            snprintf(buf, sizeof(buf), "%.0f°", t);
+          icon(0, THERMO);
+          mixed(7, LB, 0, id(c_temp), buf);
+          icon(64 - hw - 7, DROP);
+          mixed(64, LB, 1, id(c_solar), buf2);
+          break;
+        }
+        case 4: {  // today's events, scrolled once in the message font
+          const std::string &ev = id(today_event);
+          int ew = width(ev.c_str(), mf);
+          it.print(id(ev_x), MB, mf, id(c_lunar), TextAlign::BASELINE_LEFT, ev.c_str());
+          if (--id(ev_x) < -ew) id(ev_done) = true;
+          break;
+        }
+        default: {  // weekday and date
+          static const char *const WD[] = {"CN", "T2", "T3", "T4", "T5", "T6", "T7"};
+          snprintf(buf, sizeof(buf), "%s %02d/%02d", WD[now.day_of_week - 1], now.day_of_month, now.month);
+          icon_text(SUN, id(c_solar), buf);
+        }
+      }
+
+number:
+  - platform: template
+    name: "Brightness"
+    id: brightness
+    icon: mdi:brightness-6
+    min_value: 1
+    max_value: 255
+    step: 1
+    initial_value: 128
+    optimistic: true
+    restore_value: true
+    entity_category: config
+    on_value:
+      - lambda: id(apply_brightness).execute(true);
+  - platform: template
+    name: "Auto brightness min"
+    id: brightness_min
+    min_value: 1
+    max_value: 255
+    step: 1
+    initial_value: 10
+    optimistic: true
+    restore_value: true
+    entity_category: config
+    on_value:
+      - lambda: id(apply_brightness).execute(true);
+  - platform: template
+    name: "Auto brightness max"
+    id: brightness_max
+    min_value: 1
+    max_value: 255
+    step: 1
+    initial_value: 200
+    optimistic: true
+    restore_value: true
+    entity_category: config
+    on_value:
+      - lambda: id(apply_brightness).execute(true);
+  - platform: template
+    name: "Night start"
+    id: night_start
+    icon: mdi:weather-night
+    unit_of_measurement: h
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 22
+    optimistic: true
+    restore_value: true
+    entity_category: config
+    on_value:
+      - script.execute:
+          id: apply_brightness
+          force: true
+  - platform: template
+    name: "Night end"
+    id: night_end
+    icon: mdi:weather-sunset-up
+    unit_of_measurement: h
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 6
+    optimistic: true
+    restore_value: true
+    entity_category: config
+    on_value:
+      - script.execute:
+          id: apply_brightness
+          force: true
+  # 0 turns the panel off for the night
+  - platform: template
+    name: "Night brightness"
+    id: night_brightness
+    icon: mdi:brightness-4
+    min_value: 0
+    max_value: 255
+    step: 1
+    initial_value: 3
+    optimistic: true
+    restore_value: true
+    entity_category: config
+    on_value:
+      - script.execute:
+          id: apply_brightness
+          force: true
+  - platform: template
+    name: "Page duration"
+    id: page_duration
+    icon: mdi:timer-outline
+    unit_of_measurement: s
+    min_value: 2
+    max_value: 60
+    step: 1
+    initial_value: 5
+    optimistic: true
+    restore_value: true
+    entity_category: config
+  # How long an alarm rings unless KEY or "Stop alarm" stops it (stock: per alarm)
+  - platform: template
+    name: "Alarm duration"
+    id: alarm_duration
+    icon: mdi:timer-alert-outline
+    unit_of_measurement: s
+    min_value: 10
+    max_value: 600
+    step: 10
+    initial_value: 60
+    optimistic: true
+    restore_value: true
+    entity_category: config
+
+text:
+  - platform: template
+    name: "Message"
+    id: message_text
+    icon: mdi:message-text
+    mode: text
+    max_length: 255
+    optimistic: true
+    initial_value: ""
+    on_value:
+      - lambda: |-
+          id(msg_x) = 64;
+          id(msg_passes) = 0;
+      - if:
+          condition:
+            lambda: return !x.empty();
+          then:
+            - rtttl.play: "msg:d=16,o=6,b=180:e,g,c7"
+
+switch:
+  - platform: template
+    name: "Display"
+    id: display_on
+    icon: mdi:led-strip
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    on_turn_on:
+      - lambda: id(apply_brightness).execute(true);
+    on_turn_off:
+      - lambda: id(apply_brightness).execute(true);
+  - platform: template
+    name: "Auto brightness"
+    id: auto_brightness
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+    on_turn_on:
+      - lambda: id(apply_brightness).execute(true);
+    on_turn_off:
+      - lambda: id(apply_brightness).execute(true);
+  - platform: template
+    name: "Show air quality"
+    id: show_air
+    icon: mdi:air-filter
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+  - platform: template
+    name: "Show temperature"
+    id: show_climate
+    icon: mdi:thermometer-water
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+  - platform: template
+    name: "Show lunar date"
+    id: show_lunar
+    icon: mdi:moon-waning-crescent
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+  # Seconds beside the time (the time shrinks a size to make room)
+  - platform: template
+    name: "Show seconds"
+    id: show_seconds
+    icon: mdi:timer-outline
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+  - platform: template
+    name: "Show events"
+    id: show_events
+    icon: mdi:calendar-star
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+  - platform: template
+    name: "Night mode"
+    id: night_mode
+    icon: mdi:weather-night
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+    on_turn_on:
+      - script.execute:
+          id: apply_brightness
+          force: true
+    on_turn_off:
+      - script.execute:
+          id: apply_brightness
+          force: true
+
+select:
+  - platform: template
+    name: "Time color"
+    id: time_color
+    icon: mdi:palette
+    options: ["Orange", "Per digit", "Rainbow"]
+    initial_option: "Orange"
+    optimistic: true
+    restore_value: true
+    entity_category: config
+  - platform: template
+    name: "Time font"
+    id: time_font
+    icon: mdi:clock-digital
+    options: ["Round 22", "Segment 22", "Outline 22", "Italic 22", "Round 16", "Segment 16", "Square 16",
+              "Bold round 16"]
+    initial_option: "Round 22"
+    optimistic: true
+    restore_value: true
+    entity_category: config
+  - platform: template
+    name: "Font"
+    id: text_font
+    icon: mdi:format-font
+    options: ["Bold", "Thin"]
+    initial_option: "Bold"
+    optimistic: true
+    restore_value: true
+    entity_category: config
+  - platform: template
+    name: "Hourly chime"
+    id: hourly_chime
+    icon: mdi:bell-ring-outline
+    options: ["Off", "Tone 1", "Tone 2", "Tone 3"]
+    initial_option: "Off"
+    optimistic: true
+    restore_value: true
+    entity_category: config
+
+script:
+  # Sets target_brightness; the 40 ms interval fades to it. Without force, auto brightness ignores changes
+  # smaller than 8 steps so light-sensor noise and passing clouds do not make the panel pulse.
+  - id: apply_brightness
+    mode: restart
+    parameters:
+      force: bool
+    then:
+      - lambda: |-
+          if (!id(display_on).state) {
+            id(target_brightness) = 0;
+            return;
+          }
+          int b;
+          auto now = id(ha_time).now();
+          int start = (int) id(night_start).state, end = (int) id(night_end).state;
+          bool night = id(night_mode).state && now.is_valid() && clock_util::in_hours(now.hour, start, end);
+          if (night) {
+            b = (int) id(night_brightness).state;
+          } else if (!id(auto_brightness).state || !id(ambient_light).has_state()) {
+            b = (int) id(brightness).state;
+          } else {
+            float lo = id(brightness_min).state, hi = id(brightness_max).state;
+            b = (int) (lo + (hi - lo) * id(ambient_light).state / 100.0f);
+            if (!force && std::abs(b - id(target_brightness)) < 8) return;
+          }
+          id(target_brightness) = b;
+  # Rings a stock tone over and over for "Alarm duration" and scrolls "Báo thức HH:MM"
+  - id: ring_alarm
+    parameters:
+      tone: int
+    then:
+      - lambda: |-
+          id(alarm_tone) = tone;
+          id(alarm_start) = millis();
+          id(alarm_ringing) = true;
+      - text.set:
+          id: message_text
+          value: !lambda 'return id(ha_time).now().strftime("Báo thức %H:%M");'
+      - script.execute: alarm_loop
+  # Replays from a script: rtttl.play inside on_finished_playback is cut off by rtttl's own cleanup.
+  # stop_alarm only clears alarm_ringing and the sound; the loop then ends by itself.
+  - id: alarm_loop
+    mode: restart
+    then:
+      - while:
+          condition:
+            lambda: "return id(alarm_ringing) && millis() - id(alarm_start) < id(alarm_duration).state * 1000;"
+          then:
+            - rtttl.play: !lambda "return clock_util::stock_tone(id(alarm_tone));"
+            - wait_until:
+                condition:
+                  not:
+                    rtttl.is_playing:
+      - script.execute: stop_alarm
+  - id: stop_alarm
+    then:
+      - if:
+          condition:
+            lambda: return id(alarm_ringing);
+          then:
+            - lambda: |-
+                id(alarm_ringing) = false;
+                id(rtttl_player).stop();
+            - text.set:
+                id: message_text
+                value: ""
+
+# ---- Sensors -------------------------------------------------------------
+
+sensor:
+  - platform: debug
+    free:
+      name: "Heap free"
+      entity_category: diagnostic
+    block:
+      name: "Heap largest block"
+      entity_category: diagnostic
+    min_free:
+      name: "Heap min free"
+      entity_category: diagnostic
+  # NTC 5k@25C to GND with pull-up to 3.3V (Steinhart-Hart coefficients from the stock firmware).
+  # The stock code uses 20000 as the divider constant, but 10k matches the room temperature.
+  - platform: adc
+    id: ntc_voltage
+    pin: GPIO35
+    attenuation: 12db
+    update_interval: 10s
+    internal: true
+  - platform: resistance
+    id: ntc_resistance
+    sensor: ntc_voltage
+    configuration: DOWNSTREAM
+    resistor: 10kOhm
+    reference_voltage: 3.3V
+    internal: true
+  - platform: ntc
+    sensor: ntc_resistance
+    id: temperature
+    name: "Temperature"
+    calibration:
+      - 9643Ohm -> 10°C
+      - 5000Ohm -> 25°C
+      - 2674Ohm -> 40°C
+    filters:
+      - sliding_window_moving_average:
+          window_size: 6
+          send_every: 3
+
+  # CDS photoresistor. The stock firmware maps (4095 - raw), so a lower voltage means more light.
+  - platform: adc
+    id: ldr_voltage
+    name: "Light sensor voltage"
+    pin: GPIO34
+    attenuation: 12db
+    update_interval: 2s
+    accuracy_decimals: 3
+    entity_category: diagnostic
+    filters:
+      - delta: 0.01
+  - platform: template
+    id: ambient_light
+    name: "Ambient light"
+    unit_of_measurement: "%"
+    icon: mdi:brightness-5
+    accuracy_decimals: 0
+    update_interval: 2s
+    lambda: |-
+      if (!id(ldr_voltage).has_state()) return {};
+      return clamp((1.0f - id(ldr_voltage).state / 3.1f) * 100.0f, 0.0f, 100.0f);
+    filters:
+      # 30 s average: the CDS reading wanders by a few percent even in steady light
+      - sliding_window_moving_average:
+          window_size: 15
+          send_every: 1
+      - delta: 2
+    on_value:
+      - if:
+          condition:
+            switch.is_on: auto_brightness
+          then:
+            - script.execute:
+                id: apply_brightness
+                force: false
+
+  - platform: template
+    id: display_brightness
+    name: "Display brightness"
+    icon: mdi:brightness-percent
+    accuracy_decimals: 0
+    update_interval: never
+    entity_category: diagnostic
+    lambda: return id(applied_brightness);
+
+  - platform: wifi_signal
+    name: "WiFi signal"
+    update_interval: 60s
+    entity_category: diagnostic
+
+  # Data from Home Assistant for the bottom pages
+  - platform: homeassistant
+    id: ha_pm_in
+    entity_id: ${pm_in_entity}
+    internal: true
+  - platform: homeassistant
+    id: ha_co2
+    entity_id: ${co2_entity}
+    internal: true
+  - platform: homeassistant
+    id: ha_temp
+    entity_id: ${temp_entity}
+    internal: true
+  - platform: homeassistant
+    id: ha_hum
+    entity_id: ${hum_entity}
+    internal: true
+
+# DHT21 (AM2301) on the empty SEN header, GPIO32. Uncomment if a sensor is fitted.
+#  - platform: dht
+#    pin: GPIO32
+#    model: AM2301
+#    temperature:
+#      name: "DHT temperature"
+#    humidity:
+#      name: "Humidity"
+#    update_interval: 30s
+
+# Reset reason, to tell crashes from clean restarts after an OTA, and heap headroom (see bit_depth)
+debug:
+  update_interval: 60s
+
+text_sensor:
+  # ESPHome version with the build time, to confirm which firmware is running
+  - platform: version
+    name: "Firmware"
+    entity_category: diagnostic
+  - platform: debug
+    reset_reason:
+      name: "Reset reason"
+      entity_category: diagnostic
+  # Time stored in the RTC (shown in local time), or why it can't be used
+  - platform: template
+    id: rtc_time
+    name: "RTC time"
+    icon: mdi:clock-check-outline
+    update_interval: 10min
+    entity_category: diagnostic
+    lambda: |-
+      ESPTime t;
+      bool lost, low_voltage;
+      if (!id(rtc).read_rtc(t, lost, low_voltage)) return std::string("I2C error");
+      if (lost) return std::string("Time lost");
+      if (!t.is_valid()) return std::string("Invalid");
+      return ESPTime::from_epoch_local(t.timestamp).strftime("%Y-%m-%d %H:%M:%S");
+  - platform: template
+    name: "Lunar date"
+    icon: mdi:calendar-month
+    update_interval: 60s
+    lambda: |-
+      auto now = id(ha_time).now();
+      if (!now.is_valid()) return {};
+      auto l = amlich::solar_to_lunar(now.day_of_month, now.month, now.year);
+      char buf[64];
+      snprintf(buf, sizeof(buf), "%d/%d%s %s %s", l.day, l.month, l.leap ? " (nhuận)" : "",
+               amlich::can(l.year), amlich::chi(l.year));
+      return std::string(buf);
+  - platform: template
+    id: event_text
+    name: "Today event"
+    icon: mdi:calendar-star
+    update_interval: never
+
+# ---- Buzzer and button ---------------------------------------------------
+
+output:
+  # Passive buzzer: the stock firmware drives it with ledcAttachPin(25) + ledcWriteTone
+  - platform: ledc
+    pin: GPIO25
+    id: buzzer_out
+  # GPIO33: the stock firmware toggles it once a second (heartbeat LED)
+  - platform: gpio
+    pin: GPIO33
+    id: led_out
+
+light:
+  - platform: binary
+    name: "Status LED"
+    output: led_out
+    restore_mode: ALWAYS_OFF
+    entity_category: config
+
+rtttl:
+  id: rtttl_player
+  output: buzzer_out
+  gain: 60%
+
+button:
+  - platform: template
+    name: "Beep"
+    icon: mdi:bullhorn
+    on_press:
+      - rtttl.play: "beep:d=16,o=6,b=200:c,p,c"
+  - platform: template
+    name: "Stop alarm"
+    icon: mdi:alarm-off
+    on_press:
+      - script.execute: stop_alarm
+  - platform: restart
+    name: "Restart"
+    entity_category: config
+
+binary_sensor:
+  # KEY is on GPIO0 (also the boot strap: hold it at power-on for download mode).
+  # Press: stop an alarm or a sound, else clear a message, else toggle the display.
+  - platform: gpio
+    pin:
+      number: GPIO0
+      inverted: true
+    name: "Button"
+    filters:
+      - delayed_on: 20ms
+    on_press:
+      - if:
+          condition:
+            lambda: return id(alarm_ringing);
+          then:
+            - script.execute: stop_alarm
+          else:
+            - if:
+                condition:
+                  rtttl.is_playing:
+                then:
+                  - rtttl.stop:
+                else:
+                  - if:
+                      condition:
+                        lambda: return !id(message_text).state.empty();
+                      then:
+                        - text.set:
+                            id: message_text
+                            value: ""
+                      else:
+                        - switch.toggle: display_on
+  # On while an alarm rings
+  - platform: template
+    name: "Alarm ringing"
+    icon: mdi:alarm-light
+    lambda: return id(alarm_ringing);

@@ -1,0 +1,57 @@
+# One alarm, included from lich-van-nien.yaml with vars n (number) and time (default "HH:MM:SS").
+# The stock firmware had 5 alarms with on/off, time, weekdays, tone and ring duration; the duration and
+# the ringing itself are shared (script ring_alarm in the main file).
+
+switch:
+  - platform: template
+    name: "Alarm ${n}"
+    id: alarm${n}_on
+    icon: mdi:alarm
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+datetime:
+  - platform: template
+    name: "Alarm ${n} time"
+    id: alarm${n}_time
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "${time}"
+    time_id: ha_time
+    on_time:
+      - if:
+          condition:
+            lambda: |-
+              return id(alarm${n}_on).state &&
+                     clock_util::alarm_day(id(alarm${n}_days).active_index().value_or(0),
+                                           id(ha_time).now().day_of_week);
+          then:
+            - script.execute:
+                id: ring_alarm
+                tone: !lambda "return id(alarm${n}_tone).active_index().value_or(0);"
+
+select:
+  - platform: template
+    name: "Alarm ${n} days"
+    id: alarm${n}_days
+    icon: mdi:calendar-week
+    options: ["Every day", "Mon-Fri", "Mon-Sat", "Sat-Sun"]
+    initial_option: "Every day"
+    optimistic: true
+    restore_value: true
+  # Picking a tone plays it once (not while restoring at boot)
+  - platform: template
+    name: "Alarm ${n} tone"
+    id: alarm${n}_tone
+    icon: mdi:music-note
+    options: ["Tone 1", "Tone 2", "Tone 3"]
+    initial_option: "Tone 1"
+    optimistic: true
+    restore_value: true
+    on_value:
+      - if:
+          condition:
+            lambda: "return millis() > 10000 && !id(alarm_ringing);"
+          then:
+            - rtttl.play: !lambda "return clock_util::stock_tone(i);"
