@@ -18,7 +18,7 @@ In HA: ESPHome device "Lunar Calendar Clock" (`*.lunar_calendar_clock_*`).
 | `fonts/lvn-stock.bdf`, `fonts/lvn-stock-bold.bdf` | Text font (bottom line, messages, events) taken from the stock firmware by `tools/extract_stockfont.py` (vendor's font), and a bold copy (`tools/propbdf.py --vi --bold --space=4`) |
 | `secrets.yaml` | Credentials (not for git) |
 | `firmware/` | Last built `factory.bin` (serial, offset 0) and `ota.bin` |
-| `clock-backup/` | Stock firmware: full 4 MB dump, `v218_5k.bin` from the vendor server, `PINOUT.md` |
+| `clock-backup/` | Stock firmware: `v218_5k.bin` (OTA image from the vendor server, sha256 2675cea4…1dd6), `PINOUT.md`; the full 4 MB dump stays local (Wi-Fi credentials in NVS) |
 | `analysis/` | Stock app as ELF and its Ghidra decompile (where the pinout came from) |
 | `tools/` | `mkelf.py` (ESP32 image to ELF), `pinscan.py`, `DumpAll.java` (Ghidra headless), `sim.py` + `layout.py` (64x32 layout preview) |
 

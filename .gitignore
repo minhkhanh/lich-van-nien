@@ -1,8 +1,11 @@
 # Credentials: Wi-Fi, web login, api key (also embedded in every built image)
 secrets.yaml
 firmware/
-# Stock firmware dump and saved web page hold the Wi-Fi password (NVS / form values)
-clock-backup/
+# Stock firmware dump and saved web page hold the Wi-Fi password (NVS / form values).
+# v218_5k.bin is the vendor's OTA image (app only, no NVS), so it is kept.
+clock-backup/*
+!clock-backup/v218_5k.bin
+!clock-backup/PINOUT.md
 analysis/LỊCH VẠN NIÊN LS.html
 analysis/LỊCH VẠN NIÊN LS_files/
 # ESPHome build output (contains the secrets too)
