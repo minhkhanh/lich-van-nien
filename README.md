@@ -16,15 +16,23 @@ In HA: ESPHome device "Lunar Calendar Clock" (`*.lunar_calendar_clock_*`).
 | `fonts/seg7-5x8.bdf`, `fonts/seg7-6x8-bold.bdf` | Square seven-segment digits for the bottom line, thin and bold, 8 rows like the text capitals, from `tools/seg7bdf.py [--bold] --height=8` (copy to HA too) |
 | `fonts/lvn-hour16-N[-small].bdf`, `fonts/lvn-hour22-N.bdf` | Stock clock digits (4 styles, 16 and 22 rows, plus small seconds) from `tools/extract_hourfonts.py` (vendor's) |
 | `fonts/lvn-stock.bdf`, `fonts/lvn-stock-bold.bdf` | Text font (bottom line, messages, events) taken from the stock firmware by `tools/extract_stockfont.py` (vendor's font), and a bold copy (`tools/propbdf.py --vi --bold --space=4`) |
-| `secrets.yaml` | Credentials (not for git) |
+| `secrets.yaml` | Credentials (not in git; `tools/secrets.sh pull` from Bitwarden, keys in `secrets.example.yaml`) |
 | `firmware/` | Last built `factory.bin` (serial, offset 0) and `ota.bin` |
 | `clock-backup/` | Stock firmware: `v218_5k.bin` (OTA image from the vendor server, sha256 2675cea4…1dd6), `PINOUT.md`; the full 4 MB dump stays local (Wi-Fi credentials in NVS) |
 | `analysis/` | Stock app as ELF and its Ghidra decompile (where the pinout came from) |
 | `tools/` | `mkelf.py` (ESP32 image to ELF), `pinscan.py`, `DumpAll.java` (Ghidra headless), `sim.py` + `layout.py` (64x32 layout preview) |
 
-`secrets.yaml` (mode 600) holds the credentials: Wi-Fi, `clock_web_password` (web login), `clock_api_key`
-(api + OTA encryption). It is a copy of `/config/esphome/secrets.yaml` on HA, which the other ESPHome devices
-share; change secrets there and copy the file back. `.gitignore` keeps it, `firmware/`, `clock-backup/`, the
+`secrets.yaml` (mode 600, not in git) holds the credentials: Wi-Fi, `clock_web_password` (web login),
+`clock_api_key` (api + OTA encryption); `secrets.example.yaml` lists the keys. The master copy is the Bitwarden
+Secure Note "ESPHome secrets" (one hidden field per key), and the same file is `/config/esphome/secrets.yaml`
+on HA, shared by the other ESPHome devices. `tools/secrets.sh` (Bitwarden CLI, `brew install bitwarden-cli`,
+`bw login` once) moves it around:
+
+```sh
+tools/secrets.sh pull     # Bitwarden -> secrets.yaml
+tools/secrets.sh push     # secrets.yaml -> Bitwarden, after editing it
+tools/secrets.sh deploy   # secrets.yaml -> HA (backs up the old file)
+``` `.gitignore` keeps it, `firmware/`, `clock-backup/`, the
 saved stock web page and `.esphome/` out of git, since all of them contain credentials.
 
 ## Screen
