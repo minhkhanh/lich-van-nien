@@ -1,0 +1,10 @@
+# Credentials: Wi-Fi, web login, api key (also embedded in every built image)
+secrets.yaml
+firmware/
+# Stock firmware dump and saved web page hold the Wi-Fi password (NVS / form values)
+clock-backup/
+analysis/LỊCH VẠN NIÊN LS.html
+analysis/LỊCH VẠN NIÊN LS_files/
+# ESPHome build output (contains the secrets too)
+.esphome/
+.DS_Store
