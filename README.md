@@ -65,7 +65,9 @@ clock itself, so they ring without HA. An alarm repeats its tone for `Alarm dura
 tone at every full hour, except in the night mode window and while an alarm rings. Picking a tone plays it once.
 
 The three tones are the stock firmware's (table at `0x3ffbdc30` in `analysis/app1.elf`, played from a 1 ms timer),
-converted to RTTTL in `clock_util::stock_tone()`: Tone 1 C6-D6-G6, Tone 2 D6-G6-E6, Tone 3 E6-E6-D6.
+converted to RTTTL in `clock_util::alarm_tone()`: Tone 1 C6-D6-G6, Tone 2 D6-G6-E6, Tone 3 E6-E6-D6.
+The fourth alarm tone, "Cho con" (Phạm Trọng Cầu, ~56 s), is the melody read off the truongca.com piano sheet,
+two octaves up; the `Play Cho con` button plays it once. Any other melody plays through the `play_rtttl` action.
 
 The `Message` text entity (or action `esphome.lich_van_nien_show_message`) beeps and scrolls a message with
 Vietnamese letters three times, then clears it. KEY: stop sound, else clear message, else display on/off.

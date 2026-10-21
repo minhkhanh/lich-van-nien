@@ -45,7 +45,7 @@ select:
     name: "Alarm ${n} tone"
     id: alarm${n}_tone
     icon: mdi:music-note
-    options: ["Tone 1", "Tone 2", "Tone 3"]
+    options: ["Tone 1", "Tone 2", "Tone 3", "Cho con"]
     initial_option: "Tone 1"
     optimistic: true
     restore_value: true
@@ -54,4 +54,4 @@ select:
           condition:
             lambda: "return millis() > 10000 && !id(alarm_ringing);"
           then:
-            - rtttl.play: !lambda "return clock_util::stock_tone(i);"
+            - rtttl.play: !lambda "return clock_util::alarm_tone(i);"

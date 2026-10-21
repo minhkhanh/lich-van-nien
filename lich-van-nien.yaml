@@ -107,7 +107,7 @@ time:
                                clock_util::in_hours(now.hour, (int) id(night_start).state, (int) id(night_end).state);
                   return id(hourly_chime).active_index().value_or(0) > 0 && !id(alarm_ringing) && !night;
               then:
-                - rtttl.play: !lambda "return clock_util::stock_tone(id(hourly_chime).active_index().value_or(1) - 1);"
+                - rtttl.play: !lambda "return clock_util::alarm_tone(id(hourly_chime).active_index().value_or(1) - 1);"
   - platform: rx8025
     id: rtc
     timezone: Asia/Ho_Chi_Minh
@@ -851,7 +851,7 @@ script:
           condition:
             lambda: "return id(alarm_ringing) && millis() - id(alarm_start) < id(alarm_duration).state * 1000;"
           then:
-            - rtttl.play: !lambda "return clock_util::stock_tone(id(alarm_tone));"
+            - rtttl.play: !lambda "return clock_util::alarm_tone(id(alarm_tone));"
             - wait_until:
                 condition:
                   not:
@@ -1064,6 +1064,12 @@ button:
     icon: mdi:bullhorn
     on_press:
       - rtttl.play: "beep:d=16,o=6,b=200:c,p,c"
+  # Plays the "Cho con" melody once (KEY stops it)
+  - platform: template
+    name: "Play Cho con"
+    icon: mdi:music
+    on_press:
+      - rtttl.play: !lambda "return clock_util::CHO_CON;"
   - platform: template
     name: "Stop alarm"
     icon: mdi:alarm-off

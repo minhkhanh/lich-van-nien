@@ -80,15 +80,23 @@ inline const char *weather_vn(const std::string &c) {
   return c.c_str();
 }
 
-// Alarm / hourly chime tones of the stock firmware v2.18 (table at 0x3ffbdc30: {tick ms - 1, then
-// (600/duration, Hz) pairs}, played from a 1 ms timer), as RTTTL. Stock lengths in ms are in the comments.
-inline const char *stock_tone(int i) {
+// Alarm tones as RTTTL. 0-2 are the stock firmware v2.18 tones, also used by the hourly chime (table at
+// 0x3ffbdc30: {tick ms - 1, then (600/duration, Hz) pairs}, played from a 1 ms timer); stock lengths in ms
+// are in the comments.
+static const char *const CHO_CON =
+    // "Cho con" (Phạm Trọng Cầu), melody from the truongca.com piano sheet (G major, 3/4, crotchet 100),
+    // two octaves up for the buzzer; ties across bars are whole notes. About 56 s.
+    "chocon:d=4,o=6,b=100:g,g,d,b,2a,g,g,f#,b5,2d,c,e,a5,a5,2c,d,d,a5,d,1g5,p,d,b5,c,a,2a,a,b,c7,a,2b,f#,"
+    "g,c,d,2d,c,a5,c,a,2f#,f#,g,a5,d,2b5,c,a5,b5,d,1g5,p,g5,b5,c,d,2e,f#,g,a,d,2d,c,a5,f#,g,2a,f#,b5,d,g,"
+    "1g,g,g";
+inline const char *alarm_tone(int i) {
   static const char *const TONES[] = {
       "tone1:d=16,o=6,b=100:c,d,4g,8p.",       // C6 164, D6 164, G6 604, rest 484
       "tone2:d=16,o=6,b=100:d,g,8e.,8p.",      // D6 164, G6 164, E6 404, rest 484
       "tone3:d=16,o=6,b=160:e,p,e,p,8d,4p",    // E6 93, rest 93, E6 93, rest 93, D6 183, rest 363
+      CHO_CON,
   };
-  return TONES[i >= 0 && i < 3 ? i : 0];
+  return TONES[i >= 0 && i < 4 ? i : 0];
 }
 
 // Alarm "days" option: 0 every day, 1 Mon-Fri, 2 Mon-Sat, 3 Sat-Sun. dow is ESPTime's (1 = Sunday).
